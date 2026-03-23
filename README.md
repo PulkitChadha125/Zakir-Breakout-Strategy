@@ -6,7 +6,7 @@ This project provides:
 - Symbol configuration management from CSV
 - Live net positions with manual square-off
 - Candle-based breakout strategy scheduler
-- Automated PnL-based square-off
+- LTP-based stop-loss / max-profit exits
 - Order log + API request/response viewer
 - Application event logs
 
@@ -85,15 +85,17 @@ totp,OPTIONAL_VALUE
 Format:
 
 ```csv
-Symbol,Quantity,Timeframe,MaxProfit,MaxLoss,EnableTrading
-XRPUSD,1,5,2,2,TRUE
-BTCUSD,1,1,0,3,FALSE
+Symbol,Quantity,Timeframe,MaxProfit,MaxLoss,SLCount,EnableTrading
+XRPUSD,10,1,0.01,0,2,TRUE
+BTCUSD,1,5,0.5,0.2,3,FALSE
 ```
 
 Notes:
 
 - `Timeframe` is in minutes (`1,3,5,15,30,60,120,240,360,1440,10080`)
-- `MaxLoss` should be positive in settings (comparison uses `unrealized <= -MaxLoss`)
+- `MaxProfit` can be integer or decimal (e.g. `1` or `0.05`)
+- `MaxLoss` can be integer or decimal (positive value in settings)
+- `SLCount` is max consecutive stop-loss count allowed before auto-disable
 - Only `EnableTrading=TRUE` symbols are scheduled
 
 ---
@@ -137,7 +139,7 @@ At each run:
   - `time_iso8601`
   - `open, high, low, close, volume`
 
-## Entry logic (trigger candle breakout)
+## Buy / Sell entry conditions
 
 Trigger candle = previous completed candle.
 
@@ -150,31 +152,41 @@ Trigger candle = previous completed candle.
 
 Wicks are not used for entry breakout check.
 
-## Stop-loss / target references
+Only one trade is allowed per symbol at a time.  
+No new entry is taken until the current trade exits.
 
-- Buy SL = trigger candle low
-- Sell SL = trigger candle high
-- Target is derived from `MaxProfit` (distance from entry)
+## Stop-loss and max-profit conditions (LTP based)
 
-## PnL-based square-off
+Stop-loss is body-based (depends on trigger candle color + entry side):
 
-For each enabled symbol, live position is read from `/v2/positions/margined`.
+- If trigger candle is **green** (`close > open`):
+  - BUY trade stop-loss = trigger `open`
+  - SELL trade stop-loss = trigger `close`
+- If trigger candle is **red** (`close < open`):
+  - BUY trade stop-loss = trigger `close`
+  - SELL trade stop-loss = trigger `open`
 
-- `unrealized` from `unrealized_pnl` (with fallback from `raw.unrealized_pnl`)
+- Target is derived from `MaxProfit` distance from entry price:
+  - Buy target = `entry + MaxProfit`
+  - Sell target = `entry - MaxProfit`
 
-Square-off conditions:
+Exit checks are done on live LTP every second:
 
-- Profit hit: `MaxProfit > 0 and unrealized >= MaxProfit`
-- Loss hit: `MaxLoss > 0 and unrealized <= -MaxLoss`
+- For BUY:
+  - Stop-loss hit when `LTP <= stop_loss`
+  - Max-profit hit when `LTP >= target`
+- For SELL:
+  - Stop-loss hit when `LTP >= stop_loss`
+  - Max-profit hit when `LTP <= target`
 
-On hit:
+On stop-loss or max-profit hit:
 
-- Sends reduce-only market square-off order
-- Stores broker request and response in `OrderLog.csv`
+- Sends reduce-only market square-off order to broker
+- Stores broker request/response in `OrderLog.csv`
 
 ## Post-exit behavior
 
-After square-off, symbol enters cooldown until next candle cycle.  
+After square-off (SL/target/manual close), symbol enters cooldown until next candle cycle.  
 Strategy re-check starts from next aligned candle, not same candle.
 
 ## SL counter rule
@@ -183,7 +195,7 @@ Per symbol:
 
 - Stop-loss exit -> counter +1
 - Target exit -> counter reset to 0
-- If counter reaches 2 -> symbol auto-disabled (`EnableTrading=FALSE`)
+- If counter reaches `SLCount` in `TradeSettings.csv` -> symbol auto-disabled (`EnableTrading=FALSE`)
 - Re-enabling symbol from UI resets state to fresh
 
 ---

@@ -1,2 +1,2 @@
-Symbol,Quantity,Timeframe,MaxProfit,MaxLoss,EnableTrading
-XRPUSD,1,1,1,1,TRUE
+Symbol,Quantity,Timeframe,MaxProfit,MaxLoss,SLCount,EnableTrading
+XRPUSD,10,1,0.01,0,2,TRUE

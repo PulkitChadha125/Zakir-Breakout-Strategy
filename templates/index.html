@@ -24,6 +24,9 @@
                 <span class="status-pill">
                     Broker: {{ "Logged In" if is_logged_in else "Logged Out" }}
                 </span>
+                <span class="status-pill">
+                    Strategy: {{ "Running" if strategy_running else "Stopped" }}
+                </span>
             </header>
 
             {% with messages = get_flashed_messages(with_categories=true) %}
@@ -48,6 +51,9 @@
                         <form method="post" action="{{ url_for('broker_login_and_start') }}">
                             <button type="submit" class="btn primary">Login &amp; Start</button>
                         </form>
+                        <form method="post" action="{{ url_for('broker_stop_strategy') }}">
+                            <button type="submit" class="btn danger">Stop Strategy</button>
+                        </form>
                     </div>
                 </div>
 
@@ -60,6 +66,7 @@
                                 <th>Timeframe (min)</th>
                                 <th>Max Profit</th>
                                 <th>Max Loss</th>
+                                <th>SL Count</th>
                                 <th>Trading</th>
                                 <th>Actions</th>
                             </tr>
@@ -72,6 +79,7 @@
                                     <td>{{ row.Timeframe }}</td>
                                     <td>{{ row.MaxProfit }}</td>
                                     <td>{{ row.MaxLoss }}</td>
+                                    <td>{{ row.SLCount }}</td>
                                     <td class="trade-cell">
                                         {% if row.EnableTrading == "TRUE" %}
                                             <span class="trade-enabled">Enabled</span>
@@ -90,6 +98,7 @@
                                             data-timeframe="{{ row.Timeframe }}"
                                             data-max-profit="{{ row.MaxProfit }}"
                                             data-max-loss="{{ row.MaxLoss }}"
+                                            data-sl-count="{{ row.SLCount }}"
                                             data-enable-trading="{{ row.EnableTrading }}"
                                         >
                                             Edit
@@ -108,7 +117,7 @@
                                 </tr>
                             {% else %}
                                 <tr>
-                                    <td colspan="7" class="empty-row">No symbols yet. Add your first one below.</td>
+                                    <td colspan="8" class="empty-row">No symbols yet. Add your first one below.</td>
                                 </tr>
                             {% endfor %}
                         </tbody>
@@ -132,11 +141,15 @@
                         </label>
                         <label>
                             Max Profit
-                            <input name="max_profit" type="number" step="0.1" value="0">
+                            <input name="max_profit" type="number" step="any" value="0">
                         </label>
                         <label>
                             Max Loss
-                            <input name="max_loss" type="number" step="0.1" value="0">
+                            <input name="max_loss" type="number" step="any" value="0">
+                        </label>
+                        <label>
+                            SL Count
+                            <input name="sl_count" type="number" min="1" value="2" required>
                         </label>
                         <button type="submit" class="btn primary">Add Symbol</button>
                     </form>
@@ -151,6 +164,9 @@
                     <a href="{{ url_for('index', tab='order-log', sort='newest') }}" class="btn small {{ 'primary' if sort_order != 'oldest' else '' }}">Newest First</a>
                     <a href="{{ url_for('index', tab='order-log', sort='oldest') }}" class="btn small {{ 'primary' if sort_order == 'oldest' else '' }}">Oldest First</a>
                     <a href="{{ url_for('download_order_log') }}" class="btn small">Download CSV</a>
+                    <form method="post" action="{{ url_for('clear_order_log') }}">
+                        <button type="submit" class="btn small danger">Delete Logs</button>
+                    </form>
                 </div>
                 <div class="order-log-filters">
                     <label>
@@ -174,6 +190,8 @@
                                 <th>Symbol</th>
                                 <th>Action</th>
                                 <th>Entry/Exit</th>
+                                <th>Entry Price</th>
+                                <th>Stop Loss</th>
                                 <th>API Details</th>
                             </tr>
                         </thead>
@@ -184,6 +202,8 @@
                                     <td>{{ item.symbol }}</td>
                                     <td>{{ item.action }}</td>
                                     <td>{{ item.entry_exit }}</td>
+                                    <td>{{ item.entry_price or '-' }}</td>
+                                    <td>{{ item.stop_loss or '-' }}</td>
                                     <td>
                                         <button
                                             type="button"
@@ -197,7 +217,7 @@
                                 </tr>
                             {% else %}
                                 <tr>
-                                    <td colspan="5" class="empty-row">No trades yet.</td>
+                                    <td colspan="7" class="empty-row">No trades yet.</td>
                                 </tr>
                             {% endfor %}
                         </tbody>
@@ -322,11 +342,15 @@
                     </label>
                     <label>
                         Max Profit
-                        <input id="edit-max-profit" name="max_profit" type="number" step="0.1">
+                        <input id="edit-max-profit" name="max_profit" type="number" step="any">
                     </label>
                     <label>
                         Max Loss
-                        <input id="edit-max-loss" name="max_loss" type="number" step="0.1">
+                        <input id="edit-max-loss" name="max_loss" type="number" step="any">
+                    </label>
+                    <label>
+                        SL Count
+                        <input id="edit-sl-count" name="sl_count" type="number" min="1" required>
                     </label>
                     <label>
                         Trading Status
@@ -351,6 +375,7 @@
         const editTimeframe = document.getElementById("edit-timeframe");
         const editMaxProfit = document.getElementById("edit-max-profit");
         const editMaxLoss = document.getElementById("edit-max-loss");
+        const editSlCount = document.getElementById("edit-sl-count");
         const editEnableTrading = document.getElementById("edit-enable-trading");
         const apiModal = document.getElementById("api-modal");
         const apiDetailsContent = document.getElementById("api-details-content");
@@ -368,6 +393,7 @@
             editTimeframe.value = triggerButton.dataset.timeframe || "1";
             editMaxProfit.value = triggerButton.dataset.maxProfit || "0";
             editMaxLoss.value = triggerButton.dataset.maxLoss || "0";
+            editSlCount.value = triggerButton.dataset.slCount || "2";
             editEnableTrading.value = triggerButton.dataset.enableTrading || "FALSE";
 
             modal.classList.remove("hidden");

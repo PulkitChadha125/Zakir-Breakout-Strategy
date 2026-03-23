@@ -1,17 +1,7 @@
 {
   "XRPUSD": {
     "sl_count": 0,
-    "open_trade": {
-      "symbol": "XRPUSD",
-      "side": "BUY",
-      "entry_price": 1.4187,
-      "stop_loss": 1.3669,
-      "target_price": 2.4187000000000003,
-      "trigger_time": 1774256640,
-      "trigger_upper": 1.368,
-      "trigger_lower": 1.3669,
-      "entry_time": "2026-03-23T12:23:01.918970+00:00"
-    },
+    "open_trade": null,
     "cooldown_until": 0
   }
 }
