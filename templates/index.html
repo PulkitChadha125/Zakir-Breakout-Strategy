@@ -1,0 +1,446 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Delta Breakout Strategy</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
+</head>
+<body>
+    <div class="page">
+        <aside class="sidebar">
+            <h1 class="app-title">Delta Breakout Strategy</h1>
+            <div class="menu-title">MENU</div>
+            <nav class="menu">
+                <a class="menu-item {{ 'active' if active_tab == 'symbols' else '' }}" href="{{ url_for('index', tab='symbols') }}">Symbol Settings</a>
+                <a class="menu-item {{ 'active' if active_tab == 'net-positions' else '' }}" href="{{ url_for('index', tab='net-positions') }}">Net Positions</a>
+                <a class="menu-item {{ 'active' if active_tab == 'order-log' else '' }}" href="{{ url_for('index', tab='order-log') }}">Order Log</a>
+                <a class="menu-item {{ 'active' if active_tab == 'app-log' else '' }}" href="{{ url_for('index', tab='app-log') }}">App Log</a>
+            </nav>
+        </aside>
+
+        <main class="main-panel">
+            <header class="top-bar">
+                <span class="status-pill">
+                    Broker: {{ "Logged In" if is_logged_in else "Logged Out" }}
+                </span>
+            </header>
+
+            {% with messages = get_flashed_messages(with_categories=true) %}
+                {% if messages %}
+                    <div class="alerts">
+                        {% for category, message in messages %}
+                            <div class="alert {{ category }}">{{ message }}</div>
+                        {% endfor %}
+                    </div>
+                {% endif %}
+            {% endwith %}
+
+            {% if active_tab == 'symbols' %}
+            <section class="card">
+                <div class="card-header">
+                    <h2>Symbol Settings</h2>
+                    <div class="actions">
+                        <form method="post" action="{{ url_for('load_symbols') }}">
+                            <button type="submit" class="btn">Load Symbol Settings</button>
+                        </form>
+                        <button type="button" class="btn danger" disabled>Delete All</button>
+                        <form method="post" action="{{ url_for('broker_login_and_start') }}">
+                            <button type="submit" class="btn primary">Login &amp; Start</button>
+                        </form>
+                    </div>
+                </div>
+
+                <div class="table-wrap">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Symbol</th>
+                                <th>Qty</th>
+                                <th>Timeframe (min)</th>
+                                <th>Max Profit</th>
+                                <th>Max Loss</th>
+                                <th>Trading</th>
+                                <th>Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {% for row in symbols %}
+                                <tr>
+                                    <td>{{ row.Symbol }}</td>
+                                    <td>{{ row.Quantity }}</td>
+                                    <td>{{ row.Timeframe }}</td>
+                                    <td>{{ row.MaxProfit }}</td>
+                                    <td>{{ row.MaxLoss }}</td>
+                                    <td class="trade-cell">
+                                        {% if row.EnableTrading == "TRUE" %}
+                                            <span class="trade-enabled">Enabled</span>
+                                        {% else %}
+                                            <span class="trade-disabled">Disabled</span>
+                                        {% endif %}
+                                    </td>
+                                    <td class="action-cell">
+                                        <button
+                                            type="button"
+                                            class="btn small"
+                                            data-open-edit-modal
+                                            data-row-id="{{ loop.index0 }}"
+                                            data-symbol="{{ row.Symbol }}"
+                                            data-quantity="{{ row.Quantity }}"
+                                            data-timeframe="{{ row.Timeframe }}"
+                                            data-max-profit="{{ row.MaxProfit }}"
+                                            data-max-loss="{{ row.MaxLoss }}"
+                                            data-enable-trading="{{ row.EnableTrading }}"
+                                        >
+                                            Edit
+                                        </button>
+                                        <form method="post" action="{{ url_for('toggle_trading', row_id=loop.index0) }}">
+                                            {% if row.EnableTrading == "TRUE" %}
+                                                <button type="submit" class="btn small warn">Disable</button>
+                                            {% else %}
+                                                <button type="submit" class="btn small success">Enable</button>
+                                            {% endif %}
+                                        </form>
+                                        <form method="post" action="{{ url_for('delete_symbol', row_id=loop.index0) }}">
+                                            <button type="submit" class="btn small danger">Delete</button>
+                                        </form>
+                                    </td>
+                                </tr>
+                            {% else %}
+                                <tr>
+                                    <td colspan="7" class="empty-row">No symbols yet. Add your first one below.</td>
+                                </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+
+                <div class="new-symbol">
+                    <h3>Add New Symbol</h3>
+                    <form method="post" action="{{ url_for('add_symbol') }}" class="grid-form">
+                        <label>
+                            Symbol
+                            <input name="symbol" placeholder="BTCUSD" required>
+                        </label>
+                        <label>
+                            Qty
+                            <input name="quantity" type="number" min="1" value="1" required>
+                        </label>
+                        <label>
+                            Timeframe (min)
+                            <input name="timeframe" type="number" min="1" value="1" required>
+                        </label>
+                        <label>
+                            Max Profit
+                            <input name="max_profit" type="number" step="0.1" value="0">
+                        </label>
+                        <label>
+                            Max Loss
+                            <input name="max_loss" type="number" step="0.1" value="0">
+                        </label>
+                        <button type="submit" class="btn primary">Add Symbol</button>
+                    </form>
+                </div>
+            </section>
+            {% elif active_tab == 'order-log' %}
+            <section class="card">
+                <div class="card-header">
+                    <h2>Order Log</h2>
+                </div>
+                <div class="order-log-toolbar">
+                    <a href="{{ url_for('index', tab='order-log', sort='newest') }}" class="btn small {{ 'primary' if sort_order != 'oldest' else '' }}">Newest First</a>
+                    <a href="{{ url_for('index', tab='order-log', sort='oldest') }}" class="btn small {{ 'primary' if sort_order == 'oldest' else '' }}">Oldest First</a>
+                    <a href="{{ url_for('download_order_log') }}" class="btn small">Download CSV</a>
+                </div>
+                <div class="order-log-filters">
+                    <label>
+                        Symbol
+                        <input id="order-log-symbol-filter" placeholder="e.g. BTCUSD">
+                    </label>
+                    <label>
+                        Entry/Exit
+                        <select id="order-log-type-filter">
+                            <option value="all">All</option>
+                            <option value="ENTRY">ENTRY</option>
+                            <option value="EXIT">EXIT</option>
+                        </select>
+                    </label>
+                </div>
+                <div class="order-log-table-wrap">
+                    <table class="order-log-table">
+                        <thead>
+                            <tr>
+                                <th>DateTime</th>
+                                <th>Symbol</th>
+                                <th>Action</th>
+                                <th>Entry/Exit</th>
+                                <th>API Details</th>
+                            </tr>
+                        </thead>
+                        <tbody id="order-log-table-body">
+                            {% for item in order_logs %}
+                                <tr data-symbol="{{ item.symbol }}" data-entry-exit="{{ item.entry_exit }}">
+                                    <td>{{ item.datetime }}</td>
+                                    <td>{{ item.symbol }}</td>
+                                    <td>{{ item.action }}</td>
+                                    <td>{{ item.entry_exit }}</td>
+                                    <td>
+                                        <button
+                                            type="button"
+                                            class="btn small"
+                                            data-open-api-modal
+                                            data-api-details='{{ item.api_details|tojson }}'
+                                        >
+                                            View
+                                        </button>
+                                    </td>
+                                </tr>
+                            {% else %}
+                                <tr>
+                                    <td colspan="5" class="empty-row">No trades yet.</td>
+                                </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+            </section>
+            {% elif active_tab == 'net-positions' %}
+            <section class="card">
+                <div class="card-header">
+                    <h2>Net Position Panel</h2>
+                </div>
+                {% if not is_logged_in %}
+                    <p>Please login first to view live positions.</p>
+                {% else %}
+                    <div class="order-log-table-wrap">
+                        <table class="order-log-table">
+                            <thead>
+                                <tr>
+                                    <th>Symbol</th>
+                                    <th>Side</th>
+                                    <th>Size</th>
+                                    <th>Entry Price</th>
+                                    <th>Realized PnL</th>
+                                    <th>Unrealized PnL</th>
+                                    <th>Actions</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {% for pos in net_positions %}
+                                    <tr>
+                                        <td>{{ pos.symbol }}</td>
+                                        <td>{{ pos.side }}</td>
+                                        <td>{{ pos.size }}</td>
+                                        <td>{{ pos.entry_price }}</td>
+                                        <td>{{ pos.realized_pnl if pos.realized_pnl is not none else '-' }}</td>
+                                        <td>{{ pos.unrealized_pnl if pos.unrealized_pnl is not none else '-' }}</td>
+                                        <td>
+                                            <form method="post" action="{{ url_for('close_position') }}">
+                                                <input type="hidden" name="symbol" value="{{ pos.symbol }}">
+                                                <button type="submit" class="btn small danger">Close Position</button>
+                                            </form>
+                                        </td>
+                                    </tr>
+                                {% else %}
+                                    <tr>
+                                        <td colspan="7" class="empty-row">No live running positions.</td>
+                                    </tr>
+                                {% endfor %}
+                            </tbody>
+                        </table>
+                    </div>
+                {% endif %}
+            </section>
+            {% else %}
+            <section class="card">
+                <div class="card-header">
+                    <h2>Application Log <span class="subtle-text">Recent application events</span></h2>
+                    <form method="post" action="{{ url_for('clear_app_log') }}">
+                        <button type="submit" class="btn small danger">Delete logs</button>
+                    </form>
+                </div>
+                <div class="order-log-table-wrap">
+                    <table class="order-log-table">
+                        <thead>
+                            <tr>
+                                <th>DateTime</th>
+                                <th>Level</th>
+                                <th>Message</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {% for log in app_logs %}
+                                <tr>
+                                    <td>{{ log.datetime }}</td>
+                                    <td>{{ log.level }}</td>
+                                    <td>{{ log.message }}</td>
+                                </tr>
+                            {% else %}
+                                <tr>
+                                    <td colspan="3" class="empty-row">No application logs yet.</td>
+                                </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+            </section>
+            {% endif %}
+        </main>
+    </div>
+
+    <div id="api-modal" class="modal hidden" aria-hidden="true">
+        <div class="modal-backdrop" data-close-api-modal></div>
+        <div class="modal-content" role="dialog" aria-modal="true" aria-labelledby="api-modal-title">
+            <div class="modal-header">
+                <h3 id="api-modal-title">API Details</h3>
+                <button type="button" class="btn small ghost" data-close-api-modal>Close</button>
+            </div>
+            <pre id="api-details-content" class="api-details-box"></pre>
+        </div>
+    </div>
+
+    <div id="edit-modal" class="modal hidden" aria-hidden="true">
+        <div class="modal-backdrop" data-close-edit-modal></div>
+        <div class="modal-content" role="dialog" aria-modal="true" aria-labelledby="edit-modal-title">
+            <div class="modal-header">
+                <h3 id="edit-modal-title">Edit Symbol</h3>
+                <button type="button" class="btn small ghost" data-close-edit-modal>Close</button>
+            </div>
+            <form id="edit-form" method="post">
+                <div class="modal-grid">
+                    <label>
+                        Symbol
+                        <input id="edit-symbol" name="symbol" required>
+                    </label>
+                    <label>
+                        Qty
+                        <input id="edit-quantity" name="quantity" type="number" min="1" required>
+                    </label>
+                    <label>
+                        Timeframe (min)
+                        <input id="edit-timeframe" name="timeframe" type="number" min="1" required>
+                    </label>
+                    <label>
+                        Max Profit
+                        <input id="edit-max-profit" name="max_profit" type="number" step="0.1">
+                    </label>
+                    <label>
+                        Max Loss
+                        <input id="edit-max-loss" name="max_loss" type="number" step="0.1">
+                    </label>
+                    <label>
+                        Trading Status
+                        <select id="edit-enable-trading" name="enable_trading">
+                            <option value="TRUE">Enabled</option>
+                            <option value="FALSE">Disabled</option>
+                        </select>
+                    </label>
+                </div>
+                <div class="modal-actions">
+                    <button type="submit" class="btn primary">Save Changes</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <script>
+        const modal = document.getElementById("edit-modal");
+        const editForm = document.getElementById("edit-form");
+        const editSymbol = document.getElementById("edit-symbol");
+        const editQuantity = document.getElementById("edit-quantity");
+        const editTimeframe = document.getElementById("edit-timeframe");
+        const editMaxProfit = document.getElementById("edit-max-profit");
+        const editMaxLoss = document.getElementById("edit-max-loss");
+        const editEnableTrading = document.getElementById("edit-enable-trading");
+        const apiModal = document.getElementById("api-modal");
+        const apiDetailsContent = document.getElementById("api-details-content");
+
+        function closeModal() {
+            modal.classList.add("hidden");
+            modal.setAttribute("aria-hidden", "true");
+        }
+
+        function openModal(triggerButton) {
+            const rowId = triggerButton.dataset.rowId;
+            editForm.action = `/symbols/update/${rowId}`;
+            editSymbol.value = triggerButton.dataset.symbol || "";
+            editQuantity.value = triggerButton.dataset.quantity || "1";
+            editTimeframe.value = triggerButton.dataset.timeframe || "1";
+            editMaxProfit.value = triggerButton.dataset.maxProfit || "0";
+            editMaxLoss.value = triggerButton.dataset.maxLoss || "0";
+            editEnableTrading.value = triggerButton.dataset.enableTrading || "FALSE";
+
+            modal.classList.remove("hidden");
+            modal.setAttribute("aria-hidden", "false");
+        }
+
+        document.querySelectorAll("[data-open-edit-modal]").forEach((button) => {
+            button.addEventListener("click", () => openModal(button));
+        });
+
+        document.querySelectorAll("[data-close-edit-modal]").forEach((button) => {
+            button.addEventListener("click", closeModal);
+        });
+
+        function closeApiModal() {
+            apiModal.classList.add("hidden");
+            apiModal.setAttribute("aria-hidden", "true");
+        }
+
+        document.querySelectorAll("[data-open-api-modal]").forEach((button) => {
+            button.addEventListener("click", () => {
+                const raw = button.dataset.apiDetails || "{}";
+                const parsed = JSON.parse(raw);
+                const requestBlock = JSON.stringify(parsed.broker_request || {}, null, 2);
+                const responseBlock = JSON.stringify(parsed.broker_response || {}, null, 2);
+                apiDetailsContent.textContent =
+`Order Summary
+${JSON.stringify({
+  symbol: parsed.symbol,
+  side: parsed.side,
+  entry_price: parsed.entry_price,
+  stop_loss: parsed.stop_loss,
+  target_price: parsed.target_price,
+  status: parsed.status,
+  exit_price: parsed.exit_price,
+  exit_time: parsed.exit_time,
+  reason: parsed.reason
+}, null, 2)}
+
+Broker Request
+${requestBlock}
+
+Broker Response
+${responseBlock}`;
+                apiModal.classList.remove("hidden");
+                apiModal.setAttribute("aria-hidden", "false");
+            });
+        });
+
+        document.querySelectorAll("[data-close-api-modal]").forEach((button) => {
+            button.addEventListener("click", closeApiModal);
+        });
+
+        const symbolFilter = document.getElementById("order-log-symbol-filter");
+        const typeFilter = document.getElementById("order-log-type-filter");
+        const logRows = Array.from(document.querySelectorAll("#order-log-table-body tr[data-symbol]"));
+
+        function applyLogFilters() {
+            const symbolNeedle = (symbolFilter.value || "").trim().toUpperCase();
+            const typeNeedle = typeFilter.value || "all";
+            logRows.forEach((row) => {
+                const rowSymbol = (row.dataset.symbol || "").toUpperCase();
+                const rowType = row.dataset.entryExit || "";
+                const symbolOk = !symbolNeedle || rowSymbol.includes(symbolNeedle);
+                const typeOk = typeNeedle === "all" || rowType === typeNeedle;
+                row.style.display = symbolOk && typeOk ? "" : "none";
+            });
+        }
+
+        if (symbolFilter && typeFilter) {
+            symbolFilter.addEventListener("input", applyLogFilters);
+            typeFilter.addEventListener("change", applyLogFilters);
+        }
+    </script>
+</body>
+</html>

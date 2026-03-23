@@ -1,0 +1,13 @@
+So we are going to create a Python project here. In this, we are going to be integrating our project with the delta API
+
+
+Let's start developing the UI of the software first. We are going to create a flask application 
+Which is going to have the following items in the menu:
+- Symbol setting
+- Net position
+- Order log
+- App log  In the Symbol setting tab, I want the @TradeSettings.csv  value to be shown. There should be an option to edit these settings. There should be an option to enable and disable the trading, like there is a trading column. If I click the enable button, it enables the trading. If I disable the button, it disables the trading. There is a delete option to delete this particular row. I should be having a way to add a new symbol and load symbol setting also. There should be:
+- Net position panel
+- Order log panel
+- App log panel
+

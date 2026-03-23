@@ -1,0 +1,11 @@
+datetime,level,message
+2026-03-23T12:22:22.740520+00:00,INFO,[Broker] Logging in to Delta API...
+2026-03-23T12:22:23.101893+00:00,INFO,[Broker] Login successful.
+2026-03-23T12:22:23.102891+00:00,INFO,[Broker] OHLC scheduler thread started.
+2026-03-23T12:22:23.547163+00:00,INFO,[Broker] First run scheduled for XRPUSD (1m) at 2026-03-23T12:23:00+00:00
+2026-03-23T12:23:01.278638+00:00,INFO,"[Broker] Fetching data for symbol=XRPUSD, timeframe=1m, resolution=1m, start=1774256580, end=1774268580"
+2026-03-23T12:23:01.665605+00:00,INFO,[Broker] Saved 199 candles to data/XRPUSD.csv
+2026-03-23T12:23:01.920968+00:00,INFO,"[Strategy] ENTRY XRPUSD BUY at 1.4187. Trigger range=(1.3669, 1.368), SL=1.3669, Target=2.4187000000000003"
+2026-03-23T12:24:00.808875+00:00,INFO,"[Broker] Fetching data for symbol=XRPUSD, timeframe=1m, resolution=1m, start=1774256640, end=1774268640"
+2026-03-23T12:24:01.312261+00:00,INFO,[Broker] Saved 200 candles to data/XRPUSD.csv
+2026-03-23T12:24:01.312261+00:00,INFO,[Strategy] Open trade tracked for XRPUSD but no live position found yet.
