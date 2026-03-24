@@ -18,7 +18,6 @@ from flask import Flask, Response, flash, redirect, render_template, request, se
 BASE_DIR = Path(__file__).resolve().parent
 TRADE_SETTINGS_PATH = BASE_DIR / "TradeSettings.csv"
 CREDENTIALS_PATH = BASE_DIR / "credentials.csv"
-DATA_DIR = BASE_DIR / "data"
 ORDER_LOG_PATH = BASE_DIR / "OrderLog.csv"
 APP_LOG_PATH = BASE_DIR / "AppLog.csv"
 STATE_PATH = BASE_DIR / "strategy_state.json"
@@ -358,7 +357,6 @@ def stop_scheduler_if_running() -> bool:
 
 
 def run_symbol_fetch_scheduler() -> None:
-    DATA_DIR.mkdir(exist_ok=True)
     next_run_by_key: dict[str, int] = {}
     stop_event = SCHEDULER_STATE["stop_event"]
 
@@ -407,8 +405,7 @@ def run_symbol_fetch_scheduler() -> None:
                         start_ts=start_ts,
                         end_ts=end_ts,
                     )
-                    save_symbol_candles(symbol=symbol, candles=candles)
-                    broker_log(f"[Broker] Saved {len(candles)} candles to data/{symbol}.csv")
+                    broker_log(f"[Broker] Fetched {len(candles)} candles for {symbol}")
                     update_trigger_from_candles(symbol, candles, scheduled_ts, timeframe_minutes)
                     next_run_by_key[key] = scheduled_ts + (timeframe_minutes * 60)
                     scheduled_ts = next_run_by_key[key]
@@ -605,37 +602,6 @@ def square_off_position(symbol: str, position: dict[str, Any]) -> tuple[str, dic
         return "SQUARE_OFF_FAILED", request_payload, {"success": False, "error": str(exc)}
 
 
-def save_symbol_candles(symbol: str, candles: list[dict[str, Any]]) -> None:
-    output_path = DATA_DIR / f"{symbol}.csv"
-    with output_path.open(mode="w", newline="", encoding="utf-8") as csv_file:
-        writer = csv.DictWriter(
-            csv_file,
-            fieldnames=["time", "time_human", "time_iso8601", "open", "high", "low", "close", "volume"],
-        )
-        writer.writeheader()
-        for candle in candles:
-            raw_ts = candle.get("time")
-            if raw_ts is not None:
-                ts_ist = dt.datetime.fromtimestamp(int(raw_ts), tz=IST)
-                time_human = ts_ist.strftime("%Y-%m-%d %H:%M:%S IST")
-                time_iso8601 = ts_ist.isoformat()
-            else:
-                time_human = ""
-                time_iso8601 = ""
-            writer.writerow(
-                {
-                    "time": raw_ts,
-                    "time_human": time_human,
-                    "time_iso8601": time_iso8601,
-                    "open": candle.get("open"),
-                    "high": candle.get("high"),
-                    "low": candle.get("low"),
-                    "close": candle.get("close"),
-                    "volume": candle.get("volume", 0),
-                }
-            )
-
-
 def get_current_ltp(symbol: str) -> float:
     response = requests.get(
         f"{DELTA_BASE_URL}/v2/tickers/{symbol}",
@@ -721,6 +687,7 @@ def process_ltp_cycle_for_symbol(row: dict[str, str], cycle_ts: int, live_positi
 
     if live_position and open_trade:
         ltp = get_current_ltp(symbol)
+        unrealized = extract_unrealized_pnl(live_position)
         side = str(open_trade.get("side", "")).upper()
         stop_loss = float(open_trade.get("stop_loss", 0))
         target_price_raw = open_trade.get("target_price")
@@ -730,12 +697,14 @@ def process_ltp_cycle_for_symbol(row: dict[str, str], cycle_ts: int, live_positi
         target_hit = False
         if target_price is not None and max_profit > 0:
             target_hit = (side == "BUY" and ltp >= target_price) or (side == "SELL" and ltp <= target_price)
+        pnl_target_hit = bool(max_profit > 0 and unrealized is not None and unrealized >= max_profit)
 
-        if stop_hit or target_hit:
+        if stop_hit or target_hit or pnl_target_hit:
             reason = "STOP_LOSS" if stop_hit else "TARGET"
             broker_log(
-                f"[Strategy] {reason} hit for {symbol} on LTP. "
-                f"ltp={ltp}, stop_loss={stop_loss}, target={target_price}"
+                f"[Strategy] {reason} hit for {symbol}. "
+                f"ltp={ltp}, stop_loss={stop_loss}, target={target_price}, "
+                f"unrealized={unrealized}, max_profit={max_profit}"
             )
             status, api_request, api_response = square_off_position(symbol, live_position)
             broker_log(f"[Strategy] Square-off status for {symbol}: {status}")
