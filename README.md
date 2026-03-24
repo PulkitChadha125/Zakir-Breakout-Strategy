@@ -1,4 +1,4 @@
-# Delta Breakout Strategy
+---# Delta Breakout Strategy
 
 A Flask-based trading dashboard and strategy runner integrated with Delta Broker API (India base URL).  
 This project provides:
@@ -6,7 +6,8 @@ This project provides:
 - Symbol configuration management from CSV
 - Live net positions with manual square-off
 - Candle-based breakout strategy scheduler
-- LTP-based stop-loss / max-profit exits
+- WebSocket-first LTP feed with REST fallback
+- LTP/position-based stop-loss and max-profit exits
 - Order log + API request/response viewer
 - Application event logs
 
@@ -133,29 +134,33 @@ Example (5m):
 At each run:
 
 - Fetches OHLC from `/v2/history/candles`
-- Writes `data/<SYMBOL>.csv` with:
+- Converts candles to a pandas DataFrame
+- Creates timezone-aware IST index named `date`
+- Sorts candles by `date` ascending
+- Writes `data/<SYMBOL>.csv` using DataFrame index, so first column is `date`
+- CSV includes:
+  - `date` (IST tz-aware index column)
   - `time` (unix)
-  - `time_human`
-  - `time_iso8601`
   - `open, high, low, close, volume`
+  - `time_human` and `time_iso8601`
 
 ## Buy / Sell entry conditions
 
 Trigger candle = previous completed candle.
 
 - Green trigger candle:
-  - Buy if `LTP > close`
-  - Sell if `LTP < open`
+  - Buy if `LTP >= close`
+  - Sell if `LTP <= open`
 - Red trigger candle:
-  - Buy if `LTP > open`
-  - Sell if `LTP < close`
+  - Buy if `LTP >= open`
+  - Sell if `LTP <= close`
 
 Wicks are not used for entry breakout check.
 
 Only one trade is allowed per symbol at a time.  
 No new entry is taken until the current trade exits.
 
-## Stop-loss and max-profit conditions (LTP based)
+## Stop-loss and max-profit conditions
 
 Stop-loss is body-based (depends on trigger candle color + entry side):
 
@@ -166,23 +171,35 @@ Stop-loss is body-based (depends on trigger candle color + entry side):
   - BUY trade stop-loss = trigger `close`
   - SELL trade stop-loss = trigger `open`
 
-- Target is derived from `MaxProfit` distance from entry price:
-  - Buy target = `entry + MaxProfit`
-  - Sell target = `entry - MaxProfit`
+- Target is based on unrealized PnL:
+  - Target hit when `unrealized_pnl >= MaxProfit` (for both BUY and SELL)
 
-Exit checks are done on live LTP every second:
+Exit checks run continuously in the strategy loop (~0.2s):
 
 - For BUY:
-  - Stop-loss hit when `LTP <= stop_loss`
-  - Max-profit hit when `LTP >= target`
+  - Stop-loss hit when `stop_eval_price <= stop_loss`
+  - Max-profit hit when `unrealized_pnl >= MaxProfit`
 - For SELL:
-  - Stop-loss hit when `LTP >= stop_loss`
-  - Max-profit hit when `LTP <= target`
+  - Stop-loss hit when `stop_eval_price >= stop_loss`
+  - Max-profit hit when `unrealized_pnl >= MaxProfit`
+
+Where `stop_eval_price` is a safety price built from:
+
+- Latest WebSocket LTP (primary)
+- Broker position prices (`mark_price`, `last_price`, `close`, `index_price`, `spot_price`) when available
+
+This helps execute stop-loss quickly even if a single feed lags momentarily.
 
 On stop-loss or max-profit hit:
 
 - Sends reduce-only market square-off order to broker
 - Stores broker request/response in `OrderLog.csv`
+
+### LTP feed
+
+- The app starts one shared WebSocket client to `wss://socket.india.delta.exchange`
+- Subscriptions are updated dynamically for enabled symbols
+- `get_current_ltp()` uses WebSocket cache first and falls back to REST ticker API when needed
 
 ## Post-exit behavior
 
@@ -235,6 +252,12 @@ Includes application events such as:
 - Data fetch events
 - Strategy events and errors
 
+### Terminal log timestamps
+
+- App-generated runtime logs are printed with IST timestamps, for example:
+  - `[2026-03-24 21:15:03 IST] [Strategy] ...`
+- Flask access logs keep Werkzeug default format unless customized separately.
+
 ---
 
 ## 8) Important Notes
@@ -242,6 +265,7 @@ Includes application events such as:
 - This implementation uses broker APIs directly; test in safe environment first.
 - Keep `credentials.csv` private. Do not commit secrets to public repos.
 - If broker API schema changes, endpoints/fields may require updates.
+- Header status pills in UI are live-updated from `/status` endpoint (Broker + Strategy state).
 
 ---
 

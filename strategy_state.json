@@ -1,20 +1,9 @@
 {
   "XRPUSD": {
-    "sl_count": 0,
+    "sl_count": 1,
     "open_trade": null,
-    "cooldown_until": 1774342376,
-    "active_trigger": {
-      "time": 1774342260,
-      "time_human": "2026-03-24 14:21:00 IST",
-      "candle_color": "RED",
-      "open": 1.4159,
-      "close": 1.4147,
-      "high": 1.417,
-      "low": 1.4146,
-      "buy_trigger": 1.4159,
-      "sell_trigger": 1.4147,
-      "cycle_ts": 1774342320,
-      "timeframe_minutes": 1
-    }
+    "cooldown_until": 1774372860,
+    "position_ltp_debug_logged": false,
+    "active_trigger": null
   }
 }

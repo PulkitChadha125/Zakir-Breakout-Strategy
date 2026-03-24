@@ -91,6 +91,18 @@ body {
     font-size: 12px;
 }
 
+.status-pill.is-on {
+    color: #ffc26b;
+    border-color: rgba(255, 140, 0, 0.6);
+    background: rgba(255, 140, 0, 0.12);
+}
+
+.status-pill.is-off {
+    color: var(--muted);
+    border-color: var(--border);
+    background: transparent;
+}
+
 .alerts {
     margin-bottom: 12px;
 }

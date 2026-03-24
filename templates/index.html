@@ -21,11 +21,11 @@
 
         <main class="main-panel">
             <header class="top-bar">
-                <span class="status-pill">
-                    Broker: {{ "Logged In" if is_logged_in else "Logged Out" }}
+                <span id="broker-status-pill" class="status-pill {{ 'is-on' if is_logged_in else 'is-off' }}">
+                    Broker: {{ broker_status_text }}
                 </span>
-                <span class="status-pill">
-                    Strategy: {{ "Running" if strategy_running else "Stopped" }}
+                <span id="strategy-status-pill" class="status-pill {{ 'is-on' if strategy_running else 'is-off' }}">
+                    Strategy: {{ strategy_status_text }}
                 </span>
             </header>
 
@@ -271,10 +271,12 @@
                     </div>
                 {% endif %}
             </section>
-            {% else %}
+            {% elif active_tab == 'app-log' %}
             <section class="card">
                 <div class="card-header">
                     <h2>Application Log <span class="subtle-text">Recent application events</span></h2>
+                </div>
+                <div class="order-log-toolbar app-log-toolbar">
                     <form method="post" action="{{ url_for('clear_app_log') }}">
                         <button type="submit" class="btn small danger">Delete logs</button>
                     </form>
@@ -450,6 +452,8 @@ ${responseBlock}`;
         const symbolFilter = document.getElementById("order-log-symbol-filter");
         const typeFilter = document.getElementById("order-log-type-filter");
         const logRows = Array.from(document.querySelectorAll("#order-log-table-body tr[data-symbol]"));
+        const brokerStatusPill = document.getElementById("broker-status-pill");
+        const strategyStatusPill = document.getElementById("strategy-status-pill");
 
         function applyLogFilters() {
             const symbolNeedle = (symbolFilter.value || "").trim().toUpperCase();
@@ -467,6 +471,36 @@ ${responseBlock}`;
             symbolFilter.addEventListener("input", applyLogFilters);
             typeFilter.addEventListener("change", applyLogFilters);
         }
+
+        function setStatusPill(el, label, isOn) {
+            if (!el) return;
+            el.textContent = label;
+            el.classList.toggle("is-on", Boolean(isOn));
+            el.classList.toggle("is-off", !Boolean(isOn));
+        }
+
+        async function refreshRuntimeStatus() {
+            try {
+                const response = await fetch("/status", { cache: "no-store" });
+                if (!response.ok) return;
+                const status = await response.json();
+                setStatusPill(
+                    brokerStatusPill,
+                    `Broker: ${status.broker_text || "Logged Out"}`,
+                    Boolean(status.broker_logged_in)
+                );
+                setStatusPill(
+                    strategyStatusPill,
+                    `Strategy: ${status.strategy_text || "Stopped"}`,
+                    Boolean(status.strategy_running)
+                );
+            } catch (error) {
+                // Keep last rendered status if polling fails.
+            }
+        }
+
+        refreshRuntimeStatus();
+        setInterval(refreshRuntimeStatus, 2000);
     </script>
 </body>
 </html>

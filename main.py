@@ -13,7 +13,7 @@ from typing import Any
 
 import requests
 from delta_rest_client import DeltaRestClient, OrderType
-from flask import Flask, Response, flash, redirect, render_template, request, session, url_for
+from flask import Flask, Response, flash, jsonify, redirect, render_template, request, session, url_for
 
 BASE_DIR = Path(__file__).resolve().parent
 TRADE_SETTINGS_PATH = BASE_DIR / "TradeSettings.csv"
@@ -27,6 +27,18 @@ SCHEDULER_STATE = {
     "stop_event": threading.Event(),
     "lock": threading.Lock(),
 }
+LTP_LOOP_INTERVAL_SEC = 0.2
+IDLE_LOOP_INTERVAL_SEC = 0.5
+POSITION_SYNC_INTERVAL_SEC = 1.0
+ENTRY_LTP_LOG_INTERVAL_SEC = 2.0
+OPEN_TRADE_LTP_LOG_INTERVAL_SEC = 3.0
+PENDING_POSITION_LOG_INTERVAL_SEC = 3.0
+_LAST_ENTRY_LTP_LOG_TS: dict[str, float] = {}
+_LAST_OPEN_TRADE_LTP_LOG_TS: dict[str, float] = {}
+_LAST_PENDING_POSITION_LOG_TS: dict[str, float] = {}
+_ENTRY_LTP_LOG_LOCK = threading.Lock()
+_OPEN_TRADE_LTP_LOG_LOCK = threading.Lock()
+_PENDING_POSITION_LOG_LOCK = threading.Lock()
 STATE_LOCK = threading.Lock()
 IST = dt.timezone(dt.timedelta(hours=5, minutes=30))
 PRODUCT_ID_CACHE: dict[str, int] = {}
@@ -78,16 +90,33 @@ def create_app() -> Flask:
         raw_order_logs = load_order_logs(limit=300, newest_first=newest_first)
         order_logs = format_order_logs_for_ui(raw_order_logs)
         app_logs = load_app_logs(limit=200, newest_first=True)
+        broker_status_text = "Logged In" if is_logged_in else "Logged Out"
+        strategy_status_text = "Running" if strategy_running else "Stopped"
         return render_template(
             "index.html",
             symbols=symbols,
             is_logged_in=is_logged_in,
             strategy_running=strategy_running,
+            broker_status_text=broker_status_text,
+            strategy_status_text=strategy_status_text,
             net_positions=net_positions,
             order_logs=order_logs,
             app_logs=app_logs,
             sort_order=sort_order,
             active_tab=active_tab,
+        )
+
+    @app.get("/status")
+    def status() -> Any:
+        is_logged_in = session.get("broker_logged_in", False)
+        strategy_running = is_scheduler_running()
+        return jsonify(
+            {
+                "broker_logged_in": is_logged_in,
+                "strategy_running": strategy_running,
+                "broker_text": "Logged In" if is_logged_in else "Logged Out",
+                "strategy_text": "Running" if strategy_running else "Stopped",
+            }
         )
 
     @app.get("/order-log/download")
@@ -359,19 +388,32 @@ def stop_scheduler_if_running() -> bool:
 def run_symbol_fetch_scheduler() -> None:
     next_run_by_key: dict[str, int] = {}
     stop_event = SCHEDULER_STATE["stop_event"]
+    positions_by_symbol: dict[str, dict[str, Any]] = {}
+    next_position_sync_ts = 0.0
 
     while not stop_event.is_set():
         now_dt = dt.datetime.now(dt.timezone.utc)
         now_ts = int(now_dt.timestamp())
+        now_monotonic = time.time()
         enabled_symbols = [row for row in load_trade_settings() if row["EnableTrading"] == "TRUE"]
 
         if not enabled_symbols:
             broker_log("[Broker] Scheduler idle: no enabled symbols.")
-            stop_event.wait(1)
+            stop_event.wait(IDLE_LOOP_INTERVAL_SEC)
             continue
 
         valid_keys = set()
-        positions_by_symbol = fetch_margined_positions_by_symbol()
+        any_open_trade = any(
+            bool(get_symbol_state(row["Symbol"]).get("open_trade")) for row in enabled_symbols
+        )
+        position_sync_due = now_monotonic >= next_position_sync_ts
+        if position_sync_due or any_open_trade:
+            try:
+                positions_by_symbol = fetch_margined_positions_by_symbol()
+            except Exception as exc:
+                broker_log(f"[Broker] Position sync failed: {exc}", level="ERROR")
+            interval = LTP_LOOP_INTERVAL_SEC if any_open_trade else POSITION_SYNC_INTERVAL_SEC
+            next_position_sync_ts = now_monotonic + interval
 
         for row in enabled_symbols:
             symbol = row["Symbol"]
@@ -413,7 +455,7 @@ def run_symbol_fetch_scheduler() -> None:
                 broker_log(f"[Broker] Scheduler error for {symbol}: {exc}", level="ERROR")
 
             try:
-                process_ltp_cycle_for_symbol(row, now_ts, positions_by_symbol.get(symbol))
+                process_ltp_cycle_for_symbol(row, now_ts, positions_by_symbol.get(norm_symbol(symbol)))
             except Exception as exc:
                 broker_log(f"[Strategy] LTP cycle error for {symbol}: {exc}", level="ERROR")
 
@@ -421,7 +463,7 @@ def run_symbol_fetch_scheduler() -> None:
         for key in stale_keys:
             del next_run_by_key[key]
 
-        stop_event.wait(1)
+        stop_event.wait(LTP_LOOP_INTERVAL_SEC)
 
     with SCHEDULER_STATE["lock"]:
         if SCHEDULER_STATE["thread"] is threading.current_thread():
@@ -452,6 +494,24 @@ def next_candle_start(now: dt.datetime, timeframe_minutes: int) -> dt.datetime:
     now_ts = int(now.timestamp())
     floored_ts = now_ts - (now_ts % interval_seconds)
     return dt.datetime.fromtimestamp(floored_ts + interval_seconds, tz=dt.timezone.utc)
+
+
+def post_exit_entry_allowed_after_ts(event_dt: dt.datetime, timeframe_minutes: int) -> int:
+    """Next boundary after exit bar, plus one full candle — avoid immediate re-entry on same signal bar."""
+    interval_seconds = timeframe_minutes * 60
+    after_first_boundary = next_candle_start(event_dt, timeframe_minutes)
+    return int(after_first_boundary.timestamp()) + interval_seconds
+
+
+def snap_cooldown_to_timeframe_grid(cooldown_until: int, timeframe_minutes: int) -> int:
+    if cooldown_until <= 0:
+        return 0
+    interval = timeframe_minutes * 60
+    return cooldown_until - (cooldown_until % interval)
+
+
+def norm_symbol(symbol: str) -> str:
+    return str(symbol).strip().upper()
 
 
 def fetch_ohlc_candles(symbol: str, resolution: str, start_ts: int, end_ts: int) -> list[dict[str, Any]]:
@@ -500,7 +560,7 @@ def fetch_margined_positions_by_symbol() -> dict[str, dict[str, Any]]:
     for pos in fetch_margined_positions_list():
         symbol = pos.get("product_symbol")
         if symbol:
-            mapped[str(symbol)] = pos
+            mapped[norm_symbol(str(symbol))] = pos
     return mapped
 
 
@@ -555,7 +615,7 @@ def get_symbol_timeframe_minutes(symbol: str, default_minutes: int = 1) -> int:
 def apply_manual_close_cooldown(symbol: str) -> None:
     timeframe_minutes = get_symbol_timeframe_minutes(symbol, default_minutes=1)
     now = dt.datetime.now(dt.timezone.utc)
-    next_cycle_ts = int(next_candle_start(now, timeframe_minutes).timestamp())
+    next_cycle_ts = post_exit_entry_allowed_after_ts(now, timeframe_minutes)
     state = get_symbol_state(symbol)
     clear_symbol_trade_context(state, next_cycle_ts)
     save_symbol_state(symbol, state)
@@ -604,7 +664,7 @@ def square_off_position(symbol: str, position: dict[str, Any]) -> tuple[str, dic
 
 def get_current_ltp(symbol: str) -> float:
     response = requests.get(
-        f"{DELTA_BASE_URL}/v2/tickers/{symbol}",
+        f"{DELTA_BASE_URL}/v2/tickers/{norm_symbol(symbol)}",
         timeout=(5, 10),
     )
     response.raise_for_status()
@@ -645,6 +705,9 @@ def update_trigger_from_candles(
         sell_trigger = close_price
 
     state = get_symbol_state(symbol)
+    cooldown_until = int(state.get("cooldown_until", 0) or 0)
+    if cooldown_until and cycle_ts >= cooldown_until:
+        state["cooldown_until"] = 0
     state["active_trigger"] = {
         "time": trigger_candle.get("time"),
         "time_human": dt.datetime.fromtimestamp(int(trigger_candle.get("time")), tz=IST).strftime(
@@ -669,41 +732,168 @@ def update_trigger_from_candles(
     )
 
 
+def _should_log_entry_ltp(symbol: str) -> bool:
+    key = norm_symbol(symbol)
+    with _ENTRY_LTP_LOG_LOCK:
+        now = time.time()
+        last = _LAST_ENTRY_LTP_LOG_TS.get(key, 0.0)
+        if now - last >= ENTRY_LTP_LOG_INTERVAL_SEC:
+            _LAST_ENTRY_LTP_LOG_TS[key] = now
+            return True
+        return False
+
+
+def _should_log_open_trade_ltp(symbol: str) -> bool:
+    key = norm_symbol(symbol)
+    with _OPEN_TRADE_LTP_LOG_LOCK:
+        now = time.time()
+        last = _LAST_OPEN_TRADE_LTP_LOG_TS.get(key, 0.0)
+        if now - last >= OPEN_TRADE_LTP_LOG_INTERVAL_SEC:
+            _LAST_OPEN_TRADE_LTP_LOG_TS[key] = now
+            return True
+        return False
+
+
+def _should_log_pending_position_wait(symbol: str) -> bool:
+    key = norm_symbol(symbol)
+    with _PENDING_POSITION_LOG_LOCK:
+        now = time.time()
+        last = _LAST_PENDING_POSITION_LOG_TS.get(key, 0.0)
+        if now - last >= PENDING_POSITION_LOG_INTERVAL_SEC:
+            _LAST_PENDING_POSITION_LOG_TS[key] = now
+            return True
+        return False
+
+
+def evaluate_stop_target_hits(
+    open_trade: dict[str, Any],
+    ltp: float,
+    max_profit: float,
+    unrealized: float | None,
+) -> tuple[bool, bool, bool]:
+    side = str(open_trade.get("side", "")).upper()
+    stop_loss = float(open_trade.get("stop_loss", 0))
+    target_price_raw = open_trade.get("target_price")
+    target_price = float(target_price_raw) if target_price_raw not in (None, "") else None
+
+    stop_hit = (side == "BUY" and ltp <= stop_loss) or (side == "SELL" and ltp >= stop_loss)
+    target_hit = False
+    if target_price is not None and max_profit > 0:
+        target_hit = (side == "BUY" and ltp >= target_price) or (side == "SELL" and ltp <= target_price)
+    pnl_target_hit = bool(max_profit > 0 and unrealized is not None and unrealized >= max_profit)
+    return stop_hit, target_hit, pnl_target_hit
+
+
+def resolve_live_position_for_square_off(symbol: str, max_wait_sec: float = 8.0) -> dict[str, Any] | None:
+    deadline = time.time() + max_wait_sec
+    key = norm_symbol(symbol)
+    while time.time() < deadline:
+        pos = fetch_margined_positions_by_symbol().get(key)
+        if pos:
+            try:
+                if abs(float(pos.get("size", 0) or 0)) > 1e-12:
+                    return pos
+            except (TypeError, ValueError):
+                pass
+        time.sleep(0.1)
+    return None
+
+
+def start_immediate_post_entry_monitor(
+    row: dict[str, str],
+    cycle_ts: int,
+    symbol: str,
+    max_wait_seconds: float = 3.0,
+    poll_interval_seconds: float = 0.25,
+) -> None:
+    deadline = time.time() + max_wait_seconds
+    while time.time() < deadline:
+        try:
+            live_position = fetch_margined_positions_by_symbol().get(norm_symbol(symbol))
+            process_ltp_cycle_for_symbol(row, cycle_ts, live_position)
+            state_now = get_symbol_state(symbol)
+            if not state_now.get("open_trade"):
+                return
+            if live_position:
+                return
+        except Exception as exc:
+            broker_log(f"[Strategy] Immediate post-entry monitor retry failed for {symbol}: {exc}", level="ERROR")
+        time.sleep(poll_interval_seconds)
+
+
 def process_ltp_cycle_for_symbol(row: dict[str, str], cycle_ts: int, live_position: dict[str, Any] | None) -> None:
     symbol = row["Symbol"]
     state = get_symbol_state(symbol)
     timeframe_minutes = int(float(row.get("Timeframe", "1") or 1))
     cooldown_until = int(state.get("cooldown_until", 0) or 0)
-    if cycle_ts < cooldown_until:
-        return
+    cooldown_until = snap_cooldown_to_timeframe_grid(cooldown_until, timeframe_minutes)
+    in_cooldown = cycle_ts < cooldown_until
 
     max_profit = float(row.get("MaxProfit", "0") or 0)
     open_trade = state.get("open_trade")
     trigger = state.get("active_trigger")
 
     if open_trade and not live_position:
-        broker_log(f"[Strategy] Open trade tracked for {symbol}; waiting for broker position update.")
-        return
+        refreshed = fetch_margined_positions_by_symbol().get(norm_symbol(symbol))
+        if refreshed:
+            live_position = refreshed
+        else:
+            ltp = get_current_ltp(symbol)
+            stop_hit, target_hit, pnl_target_hit = evaluate_stop_target_hits(open_trade, ltp, max_profit, None)
+            if _should_log_pending_position_wait(symbol):
+                broker_log(
+                    f"[Strategy] Open trade {symbol}: SL/Target vs LTP (no position row yet) "
+                    f"ltp={ltp}, SL={open_trade.get('stop_loss')}, target={open_trade.get('target_price')}"
+                )
+            if stop_hit or target_hit or pnl_target_hit:
+                reason = "STOP_LOSS" if stop_hit else "TARGET"
+                broker_log(
+                    f"[Strategy] {reason} (LTP-only) for {symbol}: ltp={ltp}, "
+                    f"SL={open_trade.get('stop_loss')}, target={open_trade.get('target_price')}"
+                )
+                live_for_exit = resolve_live_position_for_square_off(symbol)
+                if live_for_exit:
+                    status, api_request, api_response = square_off_position(symbol, live_for_exit)
+                    broker_log(f"[Strategy] Square-off status for {symbol}: {status}")
+                    finalize_trade_after_square_off(
+                        symbol,
+                        state,
+                        open_trade,
+                        reason,
+                        ltp,
+                        cycle_ts,
+                        timeframe_minutes,
+                        api_request=api_request,
+                        api_response=api_response,
+                    )
+                else:
+                    broker_log(
+                        f"[Strategy] {reason} fired for {symbol} but margined position still missing after wait.",
+                        level="ERROR",
+                    )
+            return
 
     if live_position and open_trade:
         ltp = get_current_ltp(symbol)
         unrealized = extract_unrealized_pnl(live_position)
-        side = str(open_trade.get("side", "")).upper()
-        stop_loss = float(open_trade.get("stop_loss", 0))
         target_price_raw = open_trade.get("target_price")
         target_price = float(target_price_raw) if target_price_raw not in (None, "") else None
+        stop_loss = float(open_trade.get("stop_loss", 0))
+        if not state.get("position_ltp_debug_logged"):
+            broker_log(
+                f"[Strategy] Net position response for {symbol}: {json.dumps(live_position, default=str)}"
+            )
+            state["position_ltp_debug_logged"] = True
+            save_symbol_state(symbol, state)
 
-        stop_hit = (side == "BUY" and ltp <= stop_loss) or (side == "SELL" and ltp >= stop_loss)
-        target_hit = False
-        if target_price is not None and max_profit > 0:
-            target_hit = (side == "BUY" and ltp >= target_price) or (side == "SELL" and ltp <= target_price)
-        pnl_target_hit = bool(max_profit > 0 and unrealized is not None and unrealized >= max_profit)
+        stop_hit, target_hit, pnl_target_hit = evaluate_stop_target_hits(
+            open_trade, ltp, max_profit, unrealized
+        )
 
         if stop_hit or target_hit or pnl_target_hit:
             reason = "STOP_LOSS" if stop_hit else "TARGET"
             broker_log(
-                f"[Strategy] {reason} hit for {symbol}. "
-                f"ltp={ltp}, stop_loss={stop_loss}, target={target_price}, "
+                f"[Strategy] {reason} hit for {symbol}. ltp={ltp}, SL={stop_loss}, target={target_price}, "
                 f"unrealized={unrealized}, max_profit={max_profit}"
             )
             status, api_request, api_response = square_off_position(symbol, live_position)
@@ -719,22 +909,39 @@ def process_ltp_cycle_for_symbol(row: dict[str, str], cycle_ts: int, live_positi
                 api_request=api_request,
                 api_response=api_response,
             )
+        elif _should_log_open_trade_ltp(symbol):
+            broker_log(
+                f"[Strategy] Open position {symbol}: ltp={ltp}, SL={stop_loss}, target={target_price}, "
+                f"uPnL={unrealized}"
+            )
         return
 
     if not trigger:
         return
 
-    ltp = get_current_ltp(symbol)
     buy_trigger = float(trigger.get("buy_trigger"))
     sell_trigger = float(trigger.get("sell_trigger"))
-    broker_log(
-        f"[Strategy] LTP check {symbol}: ltp={ltp}, buy_trigger={buy_trigger}, sell_trigger={sell_trigger}, "
-        f"trigger_color={trigger.get('candle_color')}"
-    )
 
-    if ltp > buy_trigger:
+    if in_cooldown:
+        if not _should_log_entry_ltp(symbol):
+            return
+        ltp = get_current_ltp(symbol)
+        broker_log(
+            f"[Strategy] LTP check {symbol}: ltp={ltp}, buy_trigger={buy_trigger}, sell_trigger={sell_trigger}, "
+            f"trigger_color={trigger.get('candle_color')} (cooldown: entry disabled)"
+        )
+        return
+
+    ltp = get_current_ltp(symbol)
+    if _should_log_entry_ltp(symbol):
+        broker_log(
+            f"[Strategy] LTP check {symbol}: ltp={ltp}, buy_trigger={buy_trigger}, sell_trigger={sell_trigger}, "
+            f"trigger_color={trigger.get('candle_color')}"
+        )
+
+    if ltp >= buy_trigger:
         entry_side = "BUY"
-    elif ltp < sell_trigger:
+    elif ltp <= sell_trigger:
         entry_side = "SELL"
     else:
         return
@@ -805,6 +1012,7 @@ def process_ltp_cycle_for_symbol(row: dict[str, str], cycle_ts: int, live_positi
         f"[Strategy] ENTRY {symbol} {entry_side} at {ltp}. Trigger range=({sell_trigger}, {buy_trigger}), "
         f"SL={stop_loss}, Target={target_price}"
     )
+    start_immediate_post_entry_monitor(row, cycle_ts, symbol)
 
 
 def place_entry_market_order(symbol: str, side: str, quantity: int) -> tuple[str, dict[str, Any], dict[str, Any]]:
@@ -865,7 +1073,8 @@ def finalize_trade_after_square_off(
     api_request: dict[str, Any] | None = None,
     api_response: dict[str, Any] | None = None,
 ) -> None:
-    next_cycle_ts = cycle_ts + (timeframe_minutes * 60)
+    exit_dt = dt.datetime.fromtimestamp(cycle_ts, tz=dt.timezone.utc)
+    next_cycle_ts = post_exit_entry_allowed_after_ts(exit_dt, timeframe_minutes)
     clear_symbol_trade_context(state, next_cycle_ts)
     if reason == "STOP_LOSS":
         state["sl_count"] = int(state.get("sl_count", 0)) + 1
@@ -912,7 +1121,12 @@ def disable_symbol_trading(symbol: str) -> None:
 
 
 def default_symbol_state() -> dict[str, Any]:
-    return {"sl_count": 0, "open_trade": None, "cooldown_until": 0}
+    return {
+        "sl_count": 0,
+        "open_trade": None,
+        "cooldown_until": 0,
+        "position_ltp_debug_logged": False,
+    }
 
 
 def clear_symbol_trade_context(state: dict[str, Any], cooldown_until: int) -> None:
@@ -920,6 +1134,7 @@ def clear_symbol_trade_context(state: dict[str, Any], cooldown_until: int) -> No
     state["open_trade"] = None
     state["cooldown_until"] = cooldown_until
     state["active_trigger"] = None
+    state["position_ltp_debug_logged"] = False
 
 
 def load_strategy_state() -> dict[str, Any]:
