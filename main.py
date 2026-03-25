@@ -497,10 +497,13 @@ def next_candle_start(now: dt.datetime, timeframe_minutes: int) -> dt.datetime:
 
 
 def post_exit_entry_allowed_after_ts(event_dt: dt.datetime, timeframe_minutes: int) -> int:
-    """Next boundary after exit bar, plus one full candle — avoid immediate re-entry on same signal bar."""
+    """Next candle boundary after exit bar.
+
+    For a 5-minute timeframe, if exit happens at 5:08, next boundary is 5:10.
+    """
     interval_seconds = timeframe_minutes * 60
     after_first_boundary = next_candle_start(event_dt, timeframe_minutes)
-    return int(after_first_boundary.timestamp()) + interval_seconds
+    return int(after_first_boundary.timestamp())
 
 
 def snap_cooldown_to_timeframe_grid(cooldown_until: int, timeframe_minutes: int) -> int:
@@ -652,6 +655,33 @@ def square_off_position(symbol: str, position: dict[str, Any]) -> tuple[str, dic
     }
     if not product_id or size <= 0:
         return "NO_OPEN_POSITION", request_payload, {"success": False, "error": "No open position size"}
+
+    client = create_delta_client()
+    try:
+        response = client.request("POST", "/v2/orders", payload=request_payload, auth=True)
+        response_payload = response.json()
+        return "SQUARE_OFF_SENT", request_payload, response_payload
+    except Exception as exc:
+        return "SQUARE_OFF_FAILED", request_payload, {"success": False, "error": str(exc)}
+
+
+def square_off_open_trade(symbol: str, trade: dict[str, Any]) -> tuple[str, dict[str, Any], dict[str, Any]]:
+    side = str(trade.get("side", "")).upper()
+    qty_raw = trade.get("quantity", 0)
+    try:
+        qty = max(1, int(float(qty_raw or 0)))
+    except (TypeError, ValueError):
+        qty = 0
+    close_side = "sell" if side == "BUY" else "buy"
+    request_payload = {
+        "product_symbol": norm_symbol(symbol),
+        "size": qty,
+        "side": close_side,
+        "order_type": OrderType.MARKET.value,
+        "reduce_only": "true",
+    }
+    if side not in {"BUY", "SELL"} or qty <= 0:
+        return "NO_OPEN_POSITION", request_payload, {"success": False, "error": "Invalid open_trade payload"}
 
     client = create_delta_client()
     try:
@@ -834,44 +864,33 @@ def process_ltp_cycle_for_symbol(row: dict[str, str], cycle_ts: int, live_positi
     trigger = state.get("active_trigger")
 
     if open_trade and not live_position:
-        refreshed = fetch_margined_positions_by_symbol().get(norm_symbol(symbol))
-        if refreshed:
-            live_position = refreshed
-        else:
-            ltp = get_current_ltp(symbol)
-            stop_hit, target_hit, pnl_target_hit = evaluate_stop_target_hits(open_trade, ltp, max_profit, None)
-            if _should_log_pending_position_wait(symbol):
-                broker_log(
-                    f"[Strategy] Open trade {symbol}: SL/Target vs LTP (no position row yet) "
-                    f"ltp={ltp}, SL={open_trade.get('stop_loss')}, target={open_trade.get('target_price')}"
-                )
-            if stop_hit or target_hit or pnl_target_hit:
-                reason = "STOP_LOSS" if stop_hit else "TARGET"
-                broker_log(
-                    f"[Strategy] {reason} (LTP-only) for {symbol}: ltp={ltp}, "
-                    f"SL={open_trade.get('stop_loss')}, target={open_trade.get('target_price')}"
-                )
-                live_for_exit = resolve_live_position_for_square_off(symbol)
-                if live_for_exit:
-                    status, api_request, api_response = square_off_position(symbol, live_for_exit)
-                    broker_log(f"[Strategy] Square-off status for {symbol}: {status}")
-                    finalize_trade_after_square_off(
-                        symbol,
-                        state,
-                        open_trade,
-                        reason,
-                        ltp,
-                        cycle_ts,
-                        timeframe_minutes,
-                        api_request=api_request,
-                        api_response=api_response,
-                    )
-                else:
-                    broker_log(
-                        f"[Strategy] {reason} fired for {symbol} but margined position still missing after wait.",
-                        level="ERROR",
-                    )
-            return
+        ltp = get_current_ltp(symbol)
+        stop_hit, target_hit, pnl_target_hit = evaluate_stop_target_hits(open_trade, ltp, max_profit, None)
+        if _should_log_pending_position_wait(symbol):
+            broker_log(
+                f"[Strategy] Open trade {symbol}: SL/Target vs LTP (state-driven) "
+                f"ltp={ltp}, SL={open_trade.get('stop_loss')}, target={open_trade.get('target_price')}"
+            )
+        if stop_hit or target_hit or pnl_target_hit:
+            reason = "STOP_LOSS" if stop_hit else "TARGET"
+            broker_log(
+                f"[Strategy] {reason} (state-driven) for {symbol}: ltp={ltp}, "
+                f"SL={open_trade.get('stop_loss')}, target={open_trade.get('target_price')}"
+            )
+            status, api_request, api_response = square_off_open_trade(symbol, open_trade)
+            broker_log(f"[Strategy] Square-off status for {symbol}: {status}")
+            finalize_trade_after_square_off(
+                symbol,
+                state,
+                open_trade,
+                reason,
+                ltp,
+                cycle_ts,
+                timeframe_minutes,
+                api_request=api_request,
+                api_response=api_response,
+            )
+        return
 
     if live_position and open_trade:
         ltp = get_current_ltp(symbol)
@@ -896,7 +915,7 @@ def process_ltp_cycle_for_symbol(row: dict[str, str], cycle_ts: int, live_positi
                 f"[Strategy] {reason} hit for {symbol}. ltp={ltp}, SL={stop_loss}, target={target_price}, "
                 f"unrealized={unrealized}, max_profit={max_profit}"
             )
-            status, api_request, api_response = square_off_position(symbol, live_position)
+            status, api_request, api_response = square_off_open_trade(symbol, open_trade)
             broker_log(f"[Strategy] Square-off status for {symbol}: {status}")
             finalize_trade_after_square_off(
                 symbol,
@@ -982,6 +1001,7 @@ def process_ltp_cycle_for_symbol(row: dict[str, str], cycle_ts: int, live_positi
     trade = {
         "symbol": symbol,
         "side": entry_side,
+        "quantity": quantity,
         "entry_price": ltp,
         "stop_loss": stop_loss,
         "target_price": target_price,
