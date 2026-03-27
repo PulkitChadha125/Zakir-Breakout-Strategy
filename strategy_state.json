@@ -2,7 +2,14 @@
   "XRPUSD": {
     "sl_count": 1,
     "open_trade": null,
-    "cooldown_until": 1774431360,
+    "cooldown_until": 1774528200,
+    "position_ltp_debug_logged": false,
+    "active_trigger": null
+  },
+  "PAXGUSD": {
+    "sl_count": 0,
+    "open_trade": null,
+    "cooldown_until": 1774545660,
     "position_ltp_debug_logged": false,
     "active_trigger": null
   }

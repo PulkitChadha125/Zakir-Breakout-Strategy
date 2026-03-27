@@ -28,6 +28,6 @@ if errorlevel 1 (
 )
 
 echo [Run] Starting Delta Breakout Strategy...
-call ".venv\Scripts\python.exe" main.py
+call ".venv\Scripts\python.exe" main_websocket.py
 
 endlocal
